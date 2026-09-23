@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mace-ch4"
+version = "0.1.0"
+description = "ASE + MACE-OFF pipeline for methane self-diffusion coefficients"
+requires-python = ">=3.10"
+dependencies = [
+    "ase>=3.23",
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "mace-torch",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["mace_ch4*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "network: requires internet access (e.g. downloading a MACE-OFF checkpoint)",
+]

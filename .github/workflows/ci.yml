@@ -1,0 +1,26 @@
+name: CI (fast tests)
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fast-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Deliberately skip mace-torch here: it's heavy and only the tests
+      # marked `network` (deselected below) need a real MACE calculator.
+      - name: Install lightweight dependencies
+        run: |
+          pip install ase numpy scipy matplotlib pytest
+          pip install -e . --no-deps
+
+      - name: Run fast unit tests (no network, no MACE download)
+        run: pytest -m "not network" -v

@@ -1,0 +1,152 @@
+name: MD production (CPU)
+
+# Heavy production MD, chained across runs on GitHub's free standard CPU
+# runners (see /memories/session/plan.md for the reasoning: GPU larger
+# runners are never free, Codespaces has no GPU at all). Each job is capped
+# at 6h by GitHub regardless of plan; this workflow checkpoints and exits
+# cleanly well before that, then a later scheduled run resumes automatically.
+#
+# TOTAL_STEPS below is a PLACEHOLDER. Do not trust it for a real production
+# run until it has been set from an actual measured steps/second benchmark
+# on a standard GitHub-hosted runner (Phase 2, step 8 of the plan).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: md-production
+  cancel-in-progress: false
+
+env:
+  STATE_POINT: "T400K-P0.2GPa"
+  TEMPERATURE_K: "400"
+  PRESSURE_GPA: "0.2"
+  TIMESTEP_FS: "0.5"
+  TOTAL_STEPS: "2000000" # PLACEHOLDER -- replace once benchmarked, see note above
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340 # buffer under the 360-minute (6h) hosted-runner hard cap
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - n_molecules: 64
+            label: n64
+          - n_molecules: 128
+            label: n128
+    steps:
+      - name: Check out scripts
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install ase numpy scipy matplotlib mace-torch
+          pip install -e . --no-deps
+
+      - name: Fetch or create the results branch as a worktree
+        run: |
+          git config user.name "md-production-bot"
+          git config user.email "md-production-bot@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin results; then
+            git fetch origin results
+            git worktree add results-checkout origin/results
+          else
+            git worktree add --orphan -B results results-checkout
+            find results-checkout -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+          fi
+
+      - name: Set up run directory
+        id: rundir
+        run: |
+          RUN_DIR="results-checkout/${STATE_POINT}/${{ matrix.label }}"
+          mkdir -p "$RUN_DIR"
+          echo "run_dir=$RUN_DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Build + equilibrate NPT + NVT (only on first run for this box size)
+        run: |
+          RUN_DIR="${{ steps.rundir.outputs.run_dir }}"
+          if [ ! -f "$RUN_DIR/nvt_equilibrated.xyz" ]; then
+            python scripts/build_initial_config.py \
+              --n-molecules ${{ matrix.n_molecules }} \
+              --pressure-GPa "$PRESSURE_GPA" \
+              --seed 0 \
+              --output "$RUN_DIR/initial.xyz"
+            python scripts/equilibrate_npt.py \
+              --input "$RUN_DIR/initial.xyz" \
+              --output "$RUN_DIR/npt_equilibrated.xyz" \
+              --temperature-K "$TEMPERATURE_K" \
+              --pressure-GPa "$PRESSURE_GPA" \
+              --timestep-fs "$TIMESTEP_FS" \
+              --log "$RUN_DIR/npt_diagnostics.npz"
+            # Re-thermalize at the fixed NPT volume and record the measured
+            # pressure as an EOS point (see mace_ch4.eos) -- this is what
+            # run_production.py's NVE diffusion run actually starts from.
+            python scripts/equilibrate_nvt.py \
+              --input "$RUN_DIR/npt_equilibrated.xyz" \
+              --output "$RUN_DIR/nvt_equilibrated.xyz" \
+              --temperature-K "$TEMPERATURE_K" \
+              --pressure-GPa "$PRESSURE_GPA" \
+              --timestep-fs "$TIMESTEP_FS" \
+              --eos-log "results-checkout/${STATE_POINT}/eos_results.json"
+          else
+            echo "NVT-equilibrated structure already exists, skipping build+equilibrate."
+          fi
+
+      - name: Commit and push equilibration artifacts (with retry on race)
+        run: |
+          cd results-checkout
+          git add -A
+          git diff --cached --quiet || git commit -m "Equilibrate ${STATE_POINT}/${{ matrix.label }}"
+          for i in 1 2 3 4 5; do
+            git push origin HEAD:results && break
+            echo "Push failed (attempt $i), fetching + rebasing and retrying..."
+            git fetch origin results
+            git rebase origin/results
+          done
+
+      - name: Run (or resume) production MD
+        run: |
+          RUN_DIR="${{ steps.rundir.outputs.run_dir }}"
+          if [ -f "$RUN_DIR/checkpoint.npz" ]; then
+            IS_DONE=$(python -c "import numpy as np; print(bool(np.load('$RUN_DIR/checkpoint.npz')['done']))")
+          else
+            IS_DONE="False"
+          fi
+          if [ "$IS_DONE" = "True" ]; then
+            echo "Already done; nothing to run."
+          else
+            python scripts/run_production.py \
+              --input "$RUN_DIR/nvt_equilibrated.xyz" \
+              --checkpoint "$RUN_DIR/checkpoint.npz" \
+              --com-output "$RUN_DIR/com_trajectory.npz" \
+              --timestep-fs "$TIMESTEP_FS" \
+              --total-steps "$TOTAL_STEPS" \
+              --max-wall-seconds 19800
+          fi
+
+      - name: Commit and push production progress (with retry on race)
+        if: always()
+        run: |
+          cd results-checkout
+          git add -A
+          git diff --cached --quiet || git commit -m "Production progress: ${STATE_POINT}/${{ matrix.label }}"
+          for i in 1 2 3 4 5; do
+            git push origin HEAD:results && break
+            echo "Push failed (attempt $i), fetching + rebasing and retrying..."
+            git fetch origin results
+            git rebase origin/results
+          done
