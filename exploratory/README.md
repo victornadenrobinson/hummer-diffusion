@@ -20,3 +20,16 @@ Not self-contained -- it needs two files that are not in this repo:
 The NVE window is far too short for a diffusion coefficient: the MSD is still
 ballistic at 500 fs. Use it only as a qualitative check that the models agree
 on structure, pressure, and energy conservation.
+
+## `run_statepoint.py` (+ `run_statepoint.sbatch`)
+
+Standalone, copy-to-Young version of the production pipeline for one state
+point: lattice -> 1 ps Langevin melt -> 50 ps Berendsen NPT (box set to the
+mean volume of the last half) -> 20 ps Langevin NVT (checks <P> at that
+volume) -> 200 ps NVE -> D_PBC from the multi-origin COM MSD. Thermo logs for
+every stage, first/last frames for melt/NPT/NVT, full `nve.extxyz`.
+
+Same dependencies as the comparison script (`shared_potentials.py` for the
+MACE calculators). Pass `--pressure`; the starting density is NIST at 450 K.
+Step counts can be overridden for quick tests, e.g.
+`--npt-steps 2000 --nvt-steps 1000 --nve-steps 2000`.
