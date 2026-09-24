@@ -38,3 +38,29 @@ def test_eos_points_roundtrip(tmp_path):
     points = load_eos_points(path)
     assert len(points) == 2
     assert points[0]["pressure_GPa_measured"] == pytest.approx(0.19)
+
+
+def test_fit_and_invert_recovers_known_isotherm():
+    from mace_ch4.eos import density_at_pressure, fit_pressure_vs_density
+
+    rho = np.linspace(0.2, 0.5, 7)
+    true = [4.0, -1.0, 0.3, -0.05]
+    p = np.polyval(true, rho)
+    coeffs = fit_pressure_vs_density(rho, p, stderr=np.full_like(rho, 0.01), degree=3)
+    np.testing.assert_allclose(coeffs, true, atol=1e-8)
+    target = np.polyval(true, 0.37)
+    assert density_at_pressure(coeffs, target, (0.2, 0.5)) == pytest.approx(0.37, abs=1e-9)
+
+
+def test_density_at_pressure_refuses_to_extrapolate():
+    from mace_ch4.eos import density_at_pressure
+
+    with pytest.raises(ValueError, match="outside the fitted range"):
+        density_at_pressure(np.array([1.0, 0.0]), 5.0, (0.2, 0.5))  # P = rho
+
+
+def test_reference_density_matches_nist_table_at_450K():
+    from mace_ch4.eos import reference_density_g_cm3
+
+    assert reference_density_g_cm3(450.0, 0.2) == pytest.approx(0.34586, abs=1e-4)
+    assert reference_density_g_cm3(450.0, 0.5) == pytest.approx(0.45084, abs=1e-4)

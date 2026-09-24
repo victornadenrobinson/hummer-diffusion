@@ -1,13 +1,18 @@
 #!/usr/bin/env python
-"""One (T, P) state point end to end: build -> NPT -> NVT -> NVE -> D_PBC.
+"""One (T, P) state point end to end: volume -> NVT -> NVE -> D_PBC.
+
+One job per pressure: pass --pressure-GPa; the starting density follows
+from the experimental reference EOS (mace_ch4.eos.reference_density_g_cm3).
 
 Stages, all at --timestep-fs:
-  1. build   lattice box at the NIST (Setzmann-Wagner) density for (T, P),
-             molecules made whole, short fixed-cell FIRE to clear bad contacts
-  2. NPT     Berendsen T + isotropic P coupling. The model's own density at
-             the target P (MACE's will differ from NIST's). The box is then
-             rescaled to the mean volume over the last --npt-average-fraction
-             of the run, moving whole molecules (no bond stretching).
+  1. volume  the model's own density at the target P (MACE's will differ
+             from NIST's), one of two ways:
+             * default: build a lattice box at the reference density, short
+               fixed-cell FIRE, then NPT (Berendsen T + isotropic P) and
+               rescale to the mean volume over the last
+               --npt-average-fraction of it, moving whole molecules.
+             * --eos-fit FILE: invert a P(rho) fit from scripts/eos_scan.py
+               and build the box directly at that density (no NPT).
   3. NVT     Langevin at that fixed volume: re-thermalises after the rescale,
              and its mean pressure checks the volume really gives target P.
   4. NVE     Velocity Verlet, no thermostat -- the trajectory D comes from.
@@ -18,7 +23,8 @@ Stages, all at --timestep-fs:
              This is the finite-box value; Yeh-Hummer needs >= 2 box sizes
              (scripts/finite_size_correction.py).
 
-NPT/NVT write only their first and last frames. Every stage writes a
+NPT/NVT write only their first and last frames; production_volume.extxyz
+is the fixed-volume start for NVT. Every stage writes a
 thermo log (step, time, T, U, KE, E_tot, E_tot/molecule, drift, P, V,
 density, steps/s) every --thermo-interval steps.
 
@@ -40,33 +46,26 @@ from ase import Atoms, units
 from ase.io import read, write
 from ase.md.langevin import Langevin
 from ase.md.nptberendsen import NPTBerendsen
-from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
+from ase.md.velocitydistribution import Stationary
 from ase.md.verlet import VelocityVerlet
-from ase.optimize import FIRE
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from mace_ch4.calculators import get_calculator  # noqa: E402
-from mace_ch4.eos import pressure_GPa  # noqa: E402
-from mace_ch4.geometry import ATOMS_PER_MOLECULE, build_methane_box, min_pairwise_distance  # noqa: E402
-from mace_ch4.msd import block_average_diffusion, ensemble_msd, fit_diffusion_coefficient  # noqa: E402
-from mace_ch4.unwrap import (  # noqa: E402
-    UnwrappedCOMTracker,
-    make_molecules_whole,
-    molecule_centers_of_mass,
+from mace_ch4.eos import density_at_pressure, reference_density_g_cm3  # noqa: E402
+from mace_ch4.geometry import ATOMS_PER_MOLECULE  # noqa: E402
+from mace_ch4.mdtools import (  # noqa: E402
+    Summary,
+    ThermoLog,
+    block_mean_stderr,
+    build_relaxed_box,
+    log,
+    rescale_volume_by_molecule,
+    snapshot,
+    tail_stats,
 )
+from mace_ch4.msd import block_average_diffusion, ensemble_msd, fit_diffusion_coefficient  # noqa: E402
+from mace_ch4.unwrap import UnwrappedCOMTracker, molecule_centers_of_mass  # noqa: E402
 
-# CH4 density (g/cm^3) at 450 K from the Setzmann-Wagner reference EOS (as on
-# the NIST WebBook; values via CoolProp). Only seeds the starting box -- NPT
-# finds the model's own density -- and is reported alongside it for comparison.
-NIST_DENSITY_450K_G_CM3 = {
-    0.1: 0.26473,
-    0.2: 0.34586,
-    0.3: 0.39208,
-    0.4: 0.42499,
-    0.5: 0.45084,
-}
-
-AMU_A3_TO_G_CM3 = 1.66053906660
 A2_FS_TO_M2_S = 1e-5
 
 
@@ -76,7 +75,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     p.add_argument("--temperature-K", type=float, default=450.0)
     p.add_argument("--n-molecules", type=int, default=128)
     p.add_argument("--initial-density-g-cm3", type=float, default=None,
-                   help="Starting density; defaults to the NIST value when T=450 K and P is tabulated")
+                   help="Starting density for NPT; defaults to the reference (NIST) EOS value")
+    p.add_argument("--eos-fit", default=None,
+                   help="eos_fit.json from scripts/eos_scan.py: take the volume from it and skip NPT")
     p.add_argument("--outdir", required=True)
     p.add_argument("--model", default="off23-medium")
     p.add_argument("--model-path", default=None, help="Local checkpoint (required for off24-medium)")
@@ -107,167 +108,34 @@ def parse_args(argv=None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def ndof(atoms: Atoms) -> int:
-    """3N - 3: total momentum is zeroed (Stationary) before every stage."""
-    return 3 * len(atoms) - 3
-
-
-def temperature_K(atoms: Atoms) -> float:
-    return atoms.get_kinetic_energy() / (0.5 * ndof(atoms) * units.kB)
-
-
-def density_g_cm3(atoms: Atoms) -> float:
-    return atoms.get_masses().sum() / atoms.get_volume() * AMU_A3_TO_G_CM3
-
-
-def snapshot(atoms: Atoms, **info) -> Atoms:
-    """Calculator-free copy (positions, momenta, cell) for extxyz output.
-
-    Keeps files small (no per-atom forces) and makes reading a frame back
-    restore velocities exactly.
-    """
-    snap = Atoms(numbers=atoms.get_atomic_numbers(), positions=atoms.get_positions(),
-                 cell=atoms.get_cell(), pbc=atoms.pbc)
-    snap.set_momenta(atoms.get_momenta())
-    snap.info.update(info)
-    return snap
-
-
-def rescale_volume_by_molecule(atoms: Atoms, target_volume: float, atoms_per_molecule: int) -> None:
-    """Isotropically set the cell volume, moving molecules rigidly with their COM."""
-    factor = (target_volume / atoms.get_volume()) ** (1.0 / 3.0)
-    cell = np.array(atoms.get_cell())
-    positions = make_molecules_whole(atoms.get_positions(), cell, atoms_per_molecule)
-    com = molecule_centers_of_mass(positions, atoms.get_masses(), atoms_per_molecule)
-    shift = np.repeat((factor - 1.0) * com, atoms_per_molecule, axis=0)
-    atoms.set_cell(cell * factor, scale_atoms=False)
-    atoms.set_positions(positions + shift)
-
-
-class ThermoLog:
-    """Fixed-width thermo log, one row per call, with throughput since the last row."""
-
-    COLUMNS = [
-        ("step", "{:>9d}"), ("time_ps", "{:>10.4f}"), ("T_K", "{:>8.2f}"),
-        ("U_eV", "{:>16.6f}"), ("KE_eV", "{:>11.5f}"), ("Etot_eV", "{:>16.6f}"),
-        ("Etot_per_mol_eV", "{:>16.6f}"), ("dEtot_per_mol_meV", "{:>17.4f}"),
-        ("P_GPa", "{:>8.4f}"), ("V_A3", "{:>11.3f}"), ("rho_g_cm3", "{:>9.5f}"),
-        ("steps_per_s", "{:>11.2f}"),
-    ]
-
-    def __init__(self, path: Path, stage: str, n_molecules: int, timestep_fs: float,
-                 print_interval: int, header: dict):
-        self.stage = stage
-        self.n_molecules = n_molecules
-        self.timestep_fs = timestep_fs
-        self.print_interval = print_interval
-        self.e_ref: float | None = None
-        self.rows: list[dict] = []
-        self._last_wall: float | None = None
-        self._last_step = 0
-        self._fh = open(path, "w")
-        for key, value in header.items():
-            self._fh.write(f"# {key}: {value}\n")
-        self._fh.write("# dEtot_per_mol_meV is relative to the first row of this stage "
-                       "(only a conservation check in NVE)\n")
-        self._fh.write("# " + " ".join(name for name, _ in self.COLUMNS) + "\n")
-        self._fh.flush()
-
-    def record(self, step: int, atoms: Atoms) -> dict:
-        now = time.perf_counter()
-        rate = (step - self._last_step) / (now - self._last_wall) if self._last_wall and step > self._last_step else float("nan")
-        self._last_wall, self._last_step = now, step
-
-        u = atoms.get_potential_energy()
-        ke = atoms.get_kinetic_energy()
-        etot = u + ke
-        if self.e_ref is None:
-            self.e_ref = etot
-        row = {
-            "step": step,
-            "time_ps": step * self.timestep_fs * 1e-3,
-            "T_K": temperature_K(atoms),
-            "U_eV": u,
-            "KE_eV": ke,
-            "Etot_eV": etot,
-            "Etot_per_mol_eV": etot / self.n_molecules,
-            "dEtot_per_mol_meV": 1e3 * (etot - self.e_ref) / self.n_molecules,
-            "P_GPa": pressure_GPa(atoms),
-            "V_A3": atoms.get_volume(),
-            "rho_g_cm3": density_g_cm3(atoms),
-            "steps_per_s": rate,
-        }
-        self.rows.append(row)
-        self._fh.write("  " + " ".join(fmt.format(row[name]) for name, fmt in self.COLUMNS) + "\n")
-        self._fh.flush()
-        if step % self.print_interval == 0:
-            log(f"[{self.stage}] step {step:>8d}  t={row['time_ps']:8.3f} ps  T={row['T_K']:7.2f} K  "
-                f"P={row['P_GPa']:7.4f} GPa  rho={row['rho_g_cm3']:.5f}  "
-                f"dE/mol={row['dEtot_per_mol_meV']:+8.3f} meV  {rate:7.2f} steps/s")
-        return row
-
-    def column(self, name: str) -> np.ndarray:
-        return np.array([r[name] for r in self.rows])
-
-    def close(self) -> None:
-        self._fh.close()
-
-
-_T0 = time.perf_counter()
-
-
-def log(msg: str) -> None:
-    print(f"[{time.perf_counter() - _T0:9.1f}s] {msg}", flush=True)
-
-
-def tail_stats(values: np.ndarray, fraction: float) -> tuple[float, float]:
-    tail = values[int((1.0 - fraction) * len(values)):]
-    return float(np.mean(tail)), float(np.std(tail))
-
-
-class Summary:
-    """summary.json: per-stage results; a stage present here is finished."""
-
-    def __init__(self, path: Path):
-        self.path = path
-        self.data = json.loads(path.read_text()) if path.is_file() else {}
-
-    def done(self, stage: str) -> bool:
-        return stage in self.data
-
-    def set(self, key: str, value) -> None:
-        self.data[key] = value
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(self.data, indent=2))
-        tmp.replace(self.path)
-
-
-def run_build(args, atoms_calc, outdir: Path, summary: Summary) -> Atoms:
-    density = args.initial_density_g_cm3
+def reference_density(args) -> float:
+    density = args.initial_density_g_cm3 or reference_density_g_cm3(args.temperature_K, args.pressure_GPa)
     if density is None:
-        density = NIST_DENSITY_450K_G_CM3.get(round(args.pressure_GPa, 3)) if args.temperature_K == 450.0 else None
-    if density is None:
-        raise SystemExit("No tabulated NIST density for this (T, P); pass --initial-density-g-cm3")
+        raise SystemExit("No reference density for this (T, P) (install CoolProp, or pass --initial-density-g-cm3)")
+    return density
 
-    atoms = build_methane_box(args.n_molecules, density * 1e3, seed=args.seed)
-    atoms.set_positions(make_molecules_whole(atoms.get_positions(), np.array(atoms.get_cell()), ATOMS_PER_MOLECULE))
-    log(f"[build] {args.n_molecules} CH4, {len(atoms)} atoms, L={atoms.cell.lengths()[0]:.3f} A, "
-        f"rho={density:.5f} g/cm3, min distance {min_pairwise_distance(atoms):.3f} A")
 
-    atoms.calc = atoms_calc
-    FIRE(atoms, logfile=None).run(fmax=1.0, steps=500)
-    fmax = float(np.linalg.norm(atoms.get_forces(), axis=1).max())
-    log(f"[build] fixed-cell FIRE done: max |F| = {fmax:.3f} eV/A, min distance {min_pairwise_distance(atoms):.3f} A")
+def run_volume_from_eos(args, calc, outdir: Path, summary: Summary) -> None:
+    fit = json.loads(Path(args.eos_fit).read_text())
+    if abs(fit["temperature_K"] - args.temperature_K) > 1e-6:
+        raise SystemExit(f"EOS fit is for {fit['temperature_K']} K, not {args.temperature_K} K")
+    if fit.get("model") != args.model:
+        log(f"[volume] WARNING: EOS fit was made with model {fit.get('model')!r}, running {args.model!r}")
+    density = density_at_pressure(np.array(fit["coeffs"]), args.pressure_GPa, tuple(fit["density_range_g_cm3"]))
+    log(f"[volume] EOS fit {args.eos_fit}: rho({args.pressure_GPa} GPa) = {density:.5f} g/cm3")
+    atoms = build_relaxed_box(args.n_molecules, density, args.temperature_K, calc, seed=args.seed)
+    write(outdir / "production_volume.extxyz", snapshot(atoms))
+    ref = reference_density_g_cm3(args.temperature_K, args.pressure_GPa)
+    summary.set("volume", {
+        "source": f"eos_fit:{args.eos_fit}", "density_g_cm3": density, "reference_density_g_cm3": ref,
+        "density_vs_reference_percent": 100 * (density / ref - 1) if ref else None,
+        "box_length_A": float(atoms.cell.lengths()[0]), "volume_A3": atoms.get_volume(),
+    })
 
-    MaxwellBoltzmannDistribution(atoms, temperature_K=args.temperature_K, rng=np.random.default_rng(args.seed))
-    Stationary(atoms)
+
+def run_npt(args, calc, outdir: Path, summary: Summary, header: dict) -> None:
+    atoms = build_relaxed_box(args.n_molecules, reference_density(args), args.temperature_K, calc, seed=args.seed)
     write(outdir / "initial.extxyz", snapshot(atoms))
-    summary.set("build", {"initial_density_g_cm3": density, "box_length_A": float(atoms.cell.lengths()[0]),
-                          "fire_max_force_eV_A": fmax})
-    return atoms
-
-
-def run_npt(args, atoms: Atoms, outdir: Path, summary: Summary, header: dict) -> Atoms:
     steps = args.npt_steps
     log(f"[npt] {steps} steps ({steps * args.timestep_fs / 1e3:.1f} ps) Berendsen, "
         f"T={args.temperature_K} K, P={args.pressure_GPa} GPa, taut={args.taut_fs} fs, taup={args.taup_fs} fs")
@@ -296,22 +164,26 @@ def run_npt(args, atoms: Atoms, outdir: Path, summary: Summary, header: dict) ->
     t_mean, _ = tail_stats(thermo.column("T_K"), args.npt_average_fraction)
     first_half, _ = tail_stats(thermo.column("rho_g_cm3")[: len(thermo.rows) // 2], 0.5)
     rescale_volume_by_molecule(atoms, v_mean, ATOMS_PER_MOLECULE)
-    write(outdir / "npt_mean_volume.extxyz", snapshot(atoms))
+    write(outdir / "production_volume.extxyz", snapshot(atoms))
 
-    nist = NIST_DENSITY_450K_G_CM3.get(round(args.pressure_GPa, 3)) if args.temperature_K == 450.0 else None
+    ref = reference_density_g_cm3(args.temperature_K, args.pressure_GPa)
     result = {
         "mean_volume_A3": v_mean, "std_volume_A3": v_std,
         "mean_density_g_cm3": rho_mean, "std_density_g_cm3": rho_std,
-        "nist_density_g_cm3": nist,
-        "density_vs_nist_percent": 100 * (rho_mean / nist - 1) if nist else None,
+        "reference_density_g_cm3": ref,
+        "density_vs_reference_percent": 100 * (rho_mean / ref - 1) if ref else None,
         "density_change_between_averaging_windows_percent": 100 * (rho_mean / first_half - 1),
         "mean_pressure_GPa": p_mean, "std_pressure_GPa": p_std, "mean_T_K": t_mean,
         "box_length_A": float(atoms.cell.lengths()[0]),
     }
-    log(f"[npt] <rho> = {rho_mean:.5f} +/- {rho_std:.5f} g/cm3 (NIST {nist}), <P> = {p_mean:.4f} GPa, "
+    log(f"[npt] <rho> = {rho_mean:.5f} +/- {rho_std:.5f} g/cm3 (reference {ref if ref is None else round(ref, 5)}), <P> = {p_mean:.4f} GPa, "
         f"box rescaled to L = {result['box_length_A']:.4f} A")
     summary.set("npt", result)
-    return atoms
+    summary.set("volume", {
+        "source": "npt", "density_g_cm3": rho_mean, "reference_density_g_cm3": ref,
+        "density_vs_reference_percent": result["density_vs_reference_percent"],
+        "box_length_A": result["box_length_A"], "volume_A3": v_mean,
+    })
 
 
 def run_nvt(args, atoms: Atoms, outdir: Path, summary: Summary, header: dict) -> Atoms:
@@ -332,12 +204,15 @@ def run_nvt(args, atoms: Atoms, outdir: Path, summary: Summary, header: dict) ->
     write(frame_path, snapshot(atoms, step=steps), append=True)
     thermo.close()
 
-    p_mean, p_std = tail_stats(thermo.column("P_GPa"), 0.5)
+    half = len(thermo.rows) // 2
+    p_mean, p_stderr = block_mean_stderr(thermo.column("P_GPa")[half:])
     t_mean, t_std = tail_stats(thermo.column("T_K"), 0.5)
-    log(f"[nvt] second half: <T> = {t_mean:.2f} K, <P> = {p_mean:.4f} +/- {p_std:.4f} GPa "
-        f"(target {args.pressure_GPa})")
-    summary.set("nvt", {"mean_pressure_GPa": p_mean, "std_pressure_GPa": p_std,
-                        "mean_T_K": t_mean, "std_T_K": t_std})
+    log(f"[nvt] second half: <T> = {t_mean:.2f} K, <P> = {p_mean:.4f} +/- {p_stderr:.4f} GPa (stderr; "
+        f"target {args.pressure_GPa})")
+    summary.set("nvt", {"mean_pressure_GPa": p_mean, "stderr_pressure_GPa": p_stderr,
+                        "std_pressure_GPa": float(thermo.column("P_GPa")[half:].std()),
+                        "mean_T_K": t_mean, "std_T_K": t_std,
+                        "density_g_cm3": float(thermo.column("rho_g_cm3")[-1])})
     return atoms
 
 
@@ -438,7 +313,7 @@ def run_diffusion(args, outdir: Path, summary: Summary) -> None:
         "fit_window_fraction": list(window),
         "loglog_slope": fit["loglog_slope"],
         "is_diffusive": fit["is_diffusive"],
-        "box_length_A": summary.data["npt"]["box_length_A"],
+        "box_length_A": summary.data["volume"]["box_length_A"],
         "note": "Finite-box D_PBC (no Yeh-Hummer correction)",
     }
     log(f"[msd] D_PBC = {result['D_PBC_m2_s']:.4e} m^2/s, blocks {result['block_D_mean_m2_s']:.4e} "
@@ -479,16 +354,17 @@ def main(argv=None) -> None:
         atoms.calc = calc
         return atoms
 
-    if summary.done("npt"):
-        log("[npt] already done, skipping")
+    if summary.done("volume"):
+        log(f"[volume] already done ({summary.data['volume']['source']}), skipping")
+    elif args.eos_fit:
+        run_volume_from_eos(args, calc, outdir, summary)
     else:
-        atoms = run_build(args, calc, outdir, summary)
-        run_npt(args, atoms, outdir, summary, header)
+        run_npt(args, calc, outdir, summary, header)
 
     if summary.done("nvt"):
         log("[nvt] already done, skipping")
     else:
-        run_nvt(args, load("npt_mean_volume.extxyz"), outdir, summary, header)
+        run_nvt(args, load("production_volume.extxyz"), outdir, summary, header)
 
     if summary.done("nve"):
         log("[nve] already done, skipping")

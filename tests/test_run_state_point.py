@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 from ase.io import read
 
 from toy_ch4_calculator import ToyCH4Calculator
@@ -21,7 +22,7 @@ def load_script():
 
 ARGS = [
     "--pressure-GPa", "0.2", "--n-molecules", "32", "--device", "cpu",
-    "--npt-steps", "200", "--nvt-steps", "100", "--nve-steps", "400",
+    "--npt-steps", "200", "--nvt-steps", "400", "--nve-steps", "400",
     "--thermo-interval", "10", "--print-interval", "100", "--traj-interval", "50",
     "--com-interval", "5", "--com-flush-interval", "100",
 ]
@@ -32,8 +33,8 @@ def test_full_pipeline_writes_expected_outputs(tmp_path):
     module.main(ARGS + ["--outdir", str(tmp_path)])
 
     summary = json.loads((tmp_path / "summary.json").read_text())
-    assert {"config", "build", "npt", "nvt", "nve", "diffusion"} <= summary.keys()
-    assert summary["npt"]["nist_density_g_cm3"] == 0.34586
+    assert {"config", "npt", "volume", "nvt", "nve", "diffusion"} <= summary.keys()
+    assert summary["volume"]["reference_density_g_cm3"] == pytest.approx(0.34586, abs=1e-4)
 
     # NPT/NVT: first and last frame only; NVE: every traj-interval steps incl. step 0.
     assert len(read(tmp_path / "npt.extxyz", index=":")) == 2
@@ -48,7 +49,7 @@ def test_full_pipeline_writes_expected_outputs(tmp_path):
 
     # NVE starts from the volume NPT averaged to, and conserves energy.
     last_nvt = read(tmp_path / "nvt.extxyz", index=-1)
-    assert abs(last_nvt.get_volume() - summary["npt"]["mean_volume_A3"]) < 1e-6
+    assert abs(last_nvt.get_volume() - summary["volume"]["volume_A3"]) < 1e-6
     assert summary["nve"]["max_abs_dE_per_mol_meV"] < 5.0
 
     rows = [ln for ln in (tmp_path / "thermo_nve.log").read_text().splitlines() if not ln.startswith("#")]
@@ -64,6 +65,6 @@ def test_rerun_skips_finished_stages(tmp_path, capsys):
 
     module.main(ARGS + ["--outdir", str(tmp_path)])
     out = capsys.readouterr().out
-    for stage in ("npt", "nvt", "nve"):
-        assert f"[{stage}] already done, skipping" in out
+    for stage in ("volume", "nvt", "nve"):
+        assert f"[{stage}] already done" in out
     assert (tmp_path / "nve.extxyz").stat().st_mtime_ns == before
