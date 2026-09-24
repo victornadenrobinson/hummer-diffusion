@@ -55,7 +55,11 @@ def build_methane_box(n_molecules: int, density_kg_m3: float, seed: int = 0) -> 
     grid = np.array(
         [(i, j, k) for i in range(n_side) for j in range(n_side) for k in range(n_side)],
         dtype=float,
-    )[:n_molecules]
+    )
+    # Take a random subset of sites when n_molecules isn't a perfect cube.
+    # Taking the first n_molecules in order would pack them into one slab of
+    # the box at well above the target density and leave a void beside it.
+    grid = grid[np.sort(rng.choice(len(grid), size=n_molecules, replace=False))]
     sites = (grid + 0.5) * spacing
 
     jitter_scale = 0.15 * spacing

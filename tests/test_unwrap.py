@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from mace_ch4.unwrap import UnwrappedCOMTracker, minimum_image, molecule_centers_of_mass
+from mace_ch4.unwrap import (
+    UnwrappedCOMTracker,
+    make_molecules_whole,
+    minimum_image,
+    molecule_centers_of_mass,
+)
 
 
 def test_molecule_centers_of_mass_two_molecules():
@@ -25,6 +30,24 @@ def test_molecule_centers_of_mass_rejects_bad_grouping():
     masses = np.ones(5)
     with pytest.raises(ValueError):
         molecule_centers_of_mass(positions, masses, atoms_per_molecule=2)
+
+
+def test_make_molecules_whole_rejoins_split_molecule():
+    cell = np.eye(3) * 10.0
+    # 2-atom molecule straddling x=0: anchor at 0.2, partner wrapped to 9.6.
+    positions = np.array([[0.2, 5.0, 5.0], [9.6, 5.0, 5.0]])
+    whole = make_molecules_whole(positions, cell, atoms_per_molecule=2)
+    np.testing.assert_allclose(whole, [[0.2, 5.0, 5.0], [-0.4, 5.0, 5.0]])
+
+
+def test_molecule_centers_of_mass_with_cell_handles_split_molecule():
+    cell = np.eye(3) * 10.0
+    positions = np.array([[0.2, 5.0, 5.0], [9.6, 5.0, 5.0]])
+    masses = np.array([1.0, 1.0])
+    naive = molecule_centers_of_mass(positions, masses, atoms_per_molecule=2)
+    fixed = molecule_centers_of_mass(positions, masses, atoms_per_molecule=2, cell=cell)
+    np.testing.assert_allclose(naive, [[4.9, 5.0, 5.0]])  # nowhere near either atom
+    np.testing.assert_allclose(fixed, [[-0.1, 5.0, 5.0]])
 
 
 def test_minimum_image_wraps_to_shortest_vector():

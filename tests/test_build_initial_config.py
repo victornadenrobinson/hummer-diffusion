@@ -45,6 +45,17 @@ def test_build_methane_box_no_grossly_overlapping_atoms():
     assert min_pairwise_distance(atoms) > 0.3
 
 
+def test_build_methane_box_fills_box_when_not_a_perfect_cube():
+    # 128 molecules on a 6x6x6 grid: they must spread over the whole box,
+    # not fill the first ~60% of it along x.
+    density = guess_initial_density_kg_m3(pressure_GPa=0.2)
+    atoms = build_methane_box(128, density, seed=0)
+    carbon_x = atoms.get_positions()[::ATOMS_PER_MOLECULE, 0]
+    length = atoms.cell.lengths()[0]
+    counts, _ = np.histogram(carbon_x, bins=2, range=(0.0, length))
+    assert counts.min() > 0.35 * 128
+
+
 def test_build_methane_box_rejects_zero_molecules():
     with pytest.raises(ValueError):
         build_methane_box(0, 400.0, seed=0)

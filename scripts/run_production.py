@@ -90,7 +90,8 @@ def main() -> None:
         Stationary(atoms)
         step = 0
         wrapped_com = molecule_centers_of_mass(
-            atoms.get_positions(wrap=True), atoms.get_masses(), args.atoms_per_molecule
+            atoms.get_positions(wrap=True), atoms.get_masses(), args.atoms_per_molecule,
+            cell=np.array(atoms.get_cell()),
         )
         tracker = UnwrappedCOMTracker(wrapped_com, np.array(atoms.get_cell()))
         initial_energy = atoms.get_potential_energy() + atoms.get_kinetic_energy()
@@ -129,7 +130,8 @@ def main() -> None:
 
         if step % args.sample_interval == 0:
             wrapped_com = molecule_centers_of_mass(
-                atoms.get_positions(wrap=True), atoms.get_masses(), args.atoms_per_molecule
+                atoms.get_positions(wrap=True), atoms.get_masses(), args.atoms_per_molecule,
+                cell=np.array(atoms.get_cell()),
             )
             unwrapped = tracker.update(wrapped_com)
             pending_times.append(step * args.timestep_fs)

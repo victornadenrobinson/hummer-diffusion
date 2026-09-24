@@ -4,18 +4,47 @@ from __future__ import annotations
 import numpy as np
 
 
-def molecule_centers_of_mass(
-    positions: np.ndarray, masses: np.ndarray, atoms_per_molecule: int
+def make_molecules_whole(
+    positions: np.ndarray, cell: np.ndarray, atoms_per_molecule: int
 ) -> np.ndarray:
-    """Mass-weighted center of mass for each molecule.
+    """Place every atom at the minimum image of its molecule's first atom.
 
-    Assumes atoms are grouped into contiguous blocks of ``atoms_per_molecule``.
+    Undoes per-atom wrapping, which can leave a molecule split across the
+    periodic boundary. Assumes contiguous blocks of ``atoms_per_molecule``
+    and molecules smaller than half the box.
     """
     n_atoms = positions.shape[0]
     if n_atoms % atoms_per_molecule != 0:
         raise ValueError(
             f"{n_atoms} atoms is not divisible by atoms_per_molecule={atoms_per_molecule}"
         )
+    n_mol = n_atoms // atoms_per_molecule
+    pos = positions.reshape(n_mol, atoms_per_molecule, 3)
+    anchor = pos[:, :1, :]
+    delta = minimum_image((pos - anchor).reshape(-1, 3), cell).reshape(pos.shape)
+    return (anchor + delta).reshape(n_atoms, 3)
+
+
+def molecule_centers_of_mass(
+    positions: np.ndarray,
+    masses: np.ndarray,
+    atoms_per_molecule: int,
+    cell: np.ndarray | None = None,
+) -> np.ndarray:
+    """Mass-weighted center of mass for each molecule.
+
+    Assumes atoms are grouped into contiguous blocks of ``atoms_per_molecule``.
+    Pass ``cell`` when positions may be wrapped per atom (e.g. from
+    ``get_positions(wrap=True)``): molecules are made whole first, otherwise a
+    molecule straddling the boundary gets a COM far from any of its atoms.
+    """
+    n_atoms = positions.shape[0]
+    if n_atoms % atoms_per_molecule != 0:
+        raise ValueError(
+            f"{n_atoms} atoms is not divisible by atoms_per_molecule={atoms_per_molecule}"
+        )
+    if cell is not None:
+        positions = make_molecules_whole(positions, cell, atoms_per_molecule)
     n_mol = n_atoms // atoms_per_molecule
     pos = positions.reshape(n_mol, atoms_per_molecule, 3)
     m = masses.reshape(n_mol, atoms_per_molecule, 1)
