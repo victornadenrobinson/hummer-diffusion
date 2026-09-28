@@ -1,0 +1,62 @@
+[
+  {
+    "n_atoms": 80,
+    "timestep_fs": 0.5,
+    "n_warmup_steps": 20,
+    "n_timed_steps": 100,
+    "elapsed_seconds": 92.81104197600001,
+    "steps_per_second": 1.077458003605422,
+    "ns_per_day": 0.04654618575575423,
+    "n_molecules": 16,
+    "model": "off23-medium",
+    "device": "cpu",
+    "threads": null,
+    "runner_label": "gh-actions-ubuntu-2core",
+    "timestamp_utc": "2026-09-28T13:28:18.640378+00:00"
+  },
+  {
+    "n_atoms": 160,
+    "timestep_fs": 0.5,
+    "n_warmup_steps": 20,
+    "n_timed_steps": 100,
+    "elapsed_seconds": 211.69117138500002,
+    "steps_per_second": 0.4723862565724637,
+    "ns_per_day": 0.02040708628393043,
+    "n_molecules": 32,
+    "model": "off23-medium",
+    "device": "cpu",
+    "threads": null,
+    "runner_label": "gh-actions-ubuntu-2core",
+    "timestamp_utc": "2026-09-28T13:32:43.286367+00:00"
+  },
+  {
+    "n_atoms": 320,
+    "timestep_fs": 0.5,
+    "n_warmup_steps": 20,
+    "n_timed_steps": 100,
+    "elapsed_seconds": 368.800669439,
+    "steps_per_second": 0.2711491824353646,
+    "ns_per_day": 0.01171364468120775,
+    "n_molecules": 64,
+    "model": "off23-medium",
+    "device": "cpu",
+    "threads": null,
+    "runner_label": "gh-actions-ubuntu-2core",
+    "timestamp_utc": "2026-09-28T13:40:15.235835+00:00"
+  },
+  {
+    "n_atoms": 640,
+    "timestep_fs": 0.5,
+    "n_warmup_steps": 20,
+    "n_timed_steps": 100,
+    "elapsed_seconds": 852.779572293,
+    "steps_per_second": 0.11726359688836656,
+    "ns_per_day": 0.005065787385577435,
+    "n_molecules": 128,
+    "model": "off23-medium",
+    "device": "cpu",
+    "threads": null,
+    "runner_label": "gh-actions-ubuntu-2core",
+    "timestamp_utc": "2026-09-28T13:57:50.566680+00:00"
+  }
+]
