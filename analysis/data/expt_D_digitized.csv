@@ -1,0 +1,61 @@
+# CH4 self-diffusion, experiment. DIGITIZED from a Veusz screenshot (mw-mace-expt-pbe-D-msd.vsz), not the source data:
+# log axes calibrated on tick marks; ~1% per pixel in P and D. Replace with the original table when available.
+source,T_K,P_GPa,D_1e-5_cm2_s,marker,x_px,y_px
+Ranieri,200,0.0095998,29.03,diamond,858,474
+Ranieri,200,0.019619,22.2,diamond,928,507
+Ranieri,200,0.034755,17.82,diamond,984,534
+Ranieri,200,0.040096,17.53,diamond,998,536
+Ranieri,200,0.064793,14.3,diamond,1045,561
+Ranieri,200,0.12842,10.25,diamond,1112,602
+Ranieri,200,0.24436,6.767,diamond,1175,653
+Ranieri,300,0.11957,22.56,diamond,1105,505
+Ranieri,300,0.16077,18.71,diamond,1134,528
+Ranieri,300,0.2322,15.39,diamond,1170,552
+Ranieri,300,0.27905,13.62,diamond,1188,567
+Ranieri,300,0.29068,12.66,diamond,1192,576
+Ranieri,300,0.40302,10.76,diamond,1224,596
+Ranieri,300,0.4994,9.144,diamond,1245,616
+Ranieri,300,0.807,7.048,diamond,1292,648
+Ranieri,300,1.1304,5.301,diamond,1325,683
+Ranieri,300,1.4443,3.676,diamond,1349,728
+Harris,300,0.016242,104.2,asterisk,909.5,317
+Harris,300,0.019619,84.98,asterisk,928,342
+Harris,300,0.020542,82.6,asterisk,932.5,345.5
+Harris,300,0.027341,65.5,asterisk,960.5,374
+Harris,300,0.032941,54.88,asterisk,978.75,395.75
+Harris,300,0.042197,46.16,asterisk,1003,417
+Harris,300,0.056739,38.91,asterisk,1032,438
+Harris,300,0.076683,31.56,asterisk,1061.5,463.75
+Harris,300,0.10741,26.76,asterisk,1094.5,484
+Harris,300,0.13936,22.79,asterisk,1120,503.75
+Harris,300,0.16325,20.71,asterisk,1135.5,515.5
+Greiner,300,0.010963,157.7,square,871,266
+Greiner,300,0.020966,77.71,square,934.5,353
+Greiner,300,0.026925,88.15,square,959,337.5
+Greiner,300,0.027201,62.89,square,960,379
+Greiner,300,0.030905,57.04,square,972.5,391
+Greiner,300,0.057029,37.36,square,1032.5,443
+Greiner,300,0.10741,25.91,square,1094.5,488
+Greiner,300,0.15752,22.02,square,1132,508
+Greiner,300,0.20542,17.53,square,1158,536
+Greiner,405,0.026651,145.4,square,958,276
+Greiner,405,0.056739,68.22,square,1032,369
+Greiner,405,0.10686,45.05,square,1094,420
+Greiner,405,0.15752,34.16,square,1132,454
+Greiner,405,0.20542,29.51,square,1158,472
+Greiner,455,0.010963,344.4,square,871,170
+Greiner,455,0.020859,225.6,square,934,222
+Greiner,455,0.026925,182.6,square,959,248
+Greiner,455,0.030747,145.4,square,972,276
+Greiner,455,0.056739,93.7,square,1032,330
+Greiner,455,0.10686,59.41,square,1094,386
+Greiner,455,0.15752,46.92,square,1132,415
+Greiner,455,0.20753,39.55,square,1159,436
+Ranieri NatCom,200,0.002494,402,circle,726,151
+Ranieri NatCom,200,0.0029972,304.9,circle,744,185
+Ranieri NatCom,200,0.0040302,184.1,circle,773,247
+Ranieri NatCom,200,0.0041555,164.3,circle,776,261
+Ranieri NatCom,200,0.0046023,127.6,circle,786,292
+Ranieri NatCom,200,0.0051493,89.23,circle,797,336
+Ranieri NatCom,200,0.006784,36.17,circle,824,447
+Ranieri NatCom,200,0.0075904,33.61,circle,835,456
