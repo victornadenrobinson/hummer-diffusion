@@ -3,13 +3,14 @@
 grace_check.py -- sanity + speed check of GRACE-OFF on a CH4 box before production.
 
     source ~/grace-venv/bin/activate
-    python grace_check.py                         # 2L-M, float64 and float32
-    python grace_check.py --size small --n-molecules 128
+    python grace_check.py                              # 2L-S, 2L-M, 2L-L; float64 and float32
+    python grace_check.py --sizes medium --nve-steps 4000
 
-Checks, for 32 CH4 at 0.35 g/cm3:
-  * forces = -dE/dx and stress = dE/d(strain)/V by central finite differences
-    (stress is what the pressure/EOS rests on)
-Then for --n-molecules CH4 (default 128 = 640 atoms), per precision:
+Checks, per model size:
+  * float64: forces = -dE/dx and stress = dE/d(strain)/V by central finite
+    differences on 32 CH4 at 0.35 g/cm3 (stress is what the pressure/EOS rests on)
+  * float32 vs float64 on the same frame: energy/molecule, forces, stress
+Then for --n-molecules CH4 (default 128 = 640 atoms), per size and precision:
   * steps/s of Velocity Verlet at 0.5 fs (after warm-up; the first calls
     compile the model), and |dE|/molecule over --nve-steps of NVE after a
     short Langevin melt at 450 K.
@@ -43,10 +44,15 @@ def grace_model_path(models_dir, size, dtype):
 def get_grace_calc(models_dir, size="medium", dtype="float64"):
     """GRACE-OFF 2L ASE calculator. TensorFlow uses the GPU automatically when visible.
     (tensorpotential >= 0.6 has no device/float_dtype arguments: precision is set by
-    which exported model is loaded.)"""
+    which exported model is loaded, and the input builder's dtype must match it.)"""
+    import numpy as np
     from tensorpotential.calculator import TPCalculator
 
-    return TPCalculator(model=grace_model_path(models_dir, size, dtype))
+    calc = TPCalculator(model=grace_model_path(models_dir, size, dtype))
+    if dtype == "float32":
+        # tensorpotential 0.6 always builds float64 bond vectors; the float32 export wants float32
+        calc.geom_data_builder.float_dtype = np.float32
+    return calc
 
 
 def build_box(n_mol, rho, seed=1):
@@ -87,6 +93,17 @@ def fd_checks(calc):
           f"max |stress - dE/de/V| = {worst_s * 160.2177:.2e} GPa  (both should be ~1e-4 or less)")
 
 
+def precision_check(calc64, calc32):
+    a = build_box(32, 0.35)
+    out = []
+    for c in (calc64, calc32):
+        b = a.copy(); b.calc = c
+        out.append((b.get_potential_energy(), b.get_forces(), b.get_stress()))
+    print(f"  float32 vs float64 (32 CH4): dE/mol = {1e3 * (out[1][0] - out[0][0]) / 32:+.4f} meV, "
+          f"max|dF| = {np.abs(out[1][1] - out[0][1]).max():.1e} eV/A, "
+          f"max|d stress| = {160.2177 * np.abs(out[1][2] - out[0][2]).max():.1e} GPa")
+
+
 def speed_and_nve(calc, n_mol, nve_steps):
     a = build_box(n_mol, 0.35)
     a.calc = calc
@@ -110,7 +127,7 @@ def speed_and_nve(calc, n_mol, nve_steps):
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--models-dir", default=os.path.expanduser("~/grace-off"))
-    p.add_argument("--size", default="medium", choices=["small", "medium", "large"])
+    p.add_argument("--sizes", nargs="+", default=["small", "medium", "large"], choices=["small", "medium", "large"])
     p.add_argument("--dtypes", nargs="+", default=["float64", "float32"])
     p.add_argument("--n-molecules", type=int, default=128)
     p.add_argument("--nve-steps", type=int, default=2000)
@@ -121,14 +138,19 @@ def main():
 
     gpus = tf.config.list_physical_devices("GPU")
     print(f"tensorflow {tf.__version__}; GPUs visible: {[g.name for g in gpus] or 'NONE (running on CPU)'}")
-    for dtype in args.dtypes:
-        path = grace_model_path(args.models_dir, args.size, dtype)
-        if not os.path.isdir(path):
-            sys.exit(f"model not found: {path} (clone github.com/heid-lab/grace-off to --models-dir)")
-        print(f"GRACE-OFF 2L-{args.size[0].upper()} {dtype}: {path}")
-        calc = get_grace_calc(args.models_dir, args.size, dtype)
-        fd_checks(calc)
-        speed_and_nve(calc, args.n_molecules, args.nve_steps)
+    for size in args.sizes:
+        calcs = {}
+        for dtype in args.dtypes:
+            path = grace_model_path(args.models_dir, size, dtype)
+            if not os.path.isdir(path):
+                sys.exit(f"model not found: {path} (clone github.com/heid-lab/grace-off to --models-dir)")
+            print(f"GRACE-OFF 2L-{size[0].upper()} {dtype}: {path}")
+            calcs[dtype] = get_grace_calc(args.models_dir, size, dtype)
+            if dtype == "float64":
+                fd_checks(calcs[dtype])
+            elif "float64" in calcs:
+                precision_check(calcs["float64"], calcs[dtype])
+            speed_and_nve(calcs[dtype], args.n_molecules, args.nve_steps)
 
 
 if __name__ == "__main__":

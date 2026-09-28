@@ -14,7 +14,7 @@ import sys
 NUM = r"([-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)"
 
 PATTERNS = {
-    "thermo_target": re.compile(rf"\[thermo\] (\S+), (\d+) CH4, target {NUM} K / {NUM} GPa; NVE {NUM} ps"),
+    "thermo_target": re.compile(rf"\[thermo\] (.+?), (\d+) CH4, target {NUM} K / {NUM} GPa; NVE {NUM} ps"),
     "thermo_state": re.compile(
         rf"\[thermo\] <T> = {NUM} \+/- {NUM} K, <P> = {NUM} \+/- {NUM} GPa \(std {NUM}\), "
         rf"rho = {NUM} g/cm3, L = {NUM} A"),

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-run_statepoint.py
+run_statepoint.py (v4)
 
-One CH4 state point with MACE-OFF: melt -> NPT -> NVT -> NVE -> self-diffusion D
+One CH4 state point with MACE-OFF or GRACE-OFF: melt -> NPT -> NVT -> NVE -> self-diffusion D
 (Einstein MSD + Green-Kubo VACF). NVE also records the full pressure tensor for
 shear viscosity (Green-Kubo / Einstein-Helfand, done by the analysis script).
 Restartable.
@@ -10,6 +10,30 @@ Restartable.
     python run_statepoint.py --pressure 0.2                                   # MACE-OFF23, 450 K
     python run_statepoint.py --pressure 0.3 --model mace_off24 --temperature 300
     python run_statepoint.py --pressure 0.2 --npt-steps 2000 --nvt-steps 1000 --nve-steps 2000   # quick test
+
+v4 additions:
+  --model grace_off_s|m|l   GRACE-OFF 2-layer small/medium/large (the published b_off models from
+                            github.com/heid-lab/grace-off, in --grace-dir, default $GRACE_OFF_DIR or
+                            ~/grace-off). --dtype float32 (default for GRACE; like the MACE runs) or
+                            float64. Needs tensorpotential (~/grace-venv), not torch/MACE: torch and
+                            shared_potentials.py are only imported for the MACE models.
+  --fixed-density           NVT -> NVE at --density (g/cm3): no NPT. --pressure is then optional
+                            and only a label; the reference (S-W EOS) pressure at (T, rho) is
+                            recorded as P_target. Default outdir statepoint_<model>_<T>K_rho<rho>.
+  --nve-steps 0             stop after NVT: an EOS point (thermo_nvt.log, summary.json 'nvt').
+                            Re-running the same outdir with --nve-steps N > 0 adds the NVE later.
+  --init-from DIR           start from DIR/restart.npz (a finished NVT or NVE state, any density),
+                            rescaled to this run's density by moving whole molecules, keeping the
+                            velocities -- instead of a lattice. For chained EOS scans: step the
+                            density a few % at a time and use a short --melt-steps (e.g. 2000).
+
+    # EOS-only chain at 300 K, high -> low density, GRACE-OFF 2L-M float32:
+    prev=""
+    for rho in 0.55 0.50 0.45 0.40 0.35 0.30 0.25 0.20; do
+      python run_statepoint.py --model grace_off_m --temperature 300 --fixed-density --density $rho \
+          --nvt-steps 30000 --nve-steps 0 ${prev:+--init-from $prev --melt-steps 2000}
+      prev=statepoint_grace_off_m_300K_rho$rho
+    done
 
 Per run:
   0. lattice box of whole CH4 molecules at the reference density for (T, P):
@@ -99,10 +123,6 @@ import time
 import warnings
 
 import numpy as np
-import torch
-
-torch.load = functools.partial(torch.load, weights_only=False)  # MACE checkpoint fix
-
 from ase import Atoms, units  # noqa: E402
 from ase.build import molecule  # noqa: E402
 from ase.io import write as ase_write  # noqa: E402
@@ -116,9 +136,9 @@ SHARED_POTENTIALS_DIR = os.environ.get(
     "SHARED_POTENTIALS_DIR",
     "/lustre/scratch/mmm0037/methane/first-test-md-x12t-005",
 )
-sys.path.insert(0, SHARED_POTENTIALS_DIR)
-
-import shared_potentials as sp  # noqa: E402
+GRACE_OFF_DIR = os.environ.get("GRACE_OFF_DIR", os.path.expanduser("~/grace-off"))
+GRACE_SIZES = {"grace_off_s": "small", "grace_off_m": "medium", "grace_off_l": "large"}
+MODELS = ("mace_off23", "mace_off24", *GRACE_SIZES)
 
 t0 = time.time()
 
@@ -447,8 +467,16 @@ def fmt_modes(tm):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--pressure", type=float, required=True, help="Target pressure, GPa")
-    p.add_argument("--model", default="mace_off23", choices=["mace_off23", "mace_off24"])
+    p.add_argument("--pressure", type=float, default=None,
+                   help="Target pressure, GPa (required unless --fixed-density)")
+    p.add_argument("--model", default="mace_off23", choices=MODELS)
+    p.add_argument("--dtype", default=None, choices=["float32", "float64"],
+                   help="GRACE precision (default float32); MACE precision is set in shared_potentials.py")
+    p.add_argument("--grace-dir", default=GRACE_OFF_DIR, help="clone of github.com/heid-lab/grace-off")
+    p.add_argument("--fixed-density", action="store_true",
+                   help="no NPT: melt -> NVT -> NVE at --density (g/cm3)")
+    p.add_argument("--init-from", default=None, metavar="DIR",
+                   help="start from DIR/restart.npz (after NVT or NVE), rescaled to this density, instead of a lattice")
     p.add_argument("--density", type=float, default=None,
                    help="Starting density, g/cm3 (default: reference_density(T, P), built in)")
     p.add_argument("--temperature", type=float, default=TEMPERATURE_K, help="K (default 450)")
@@ -479,10 +507,58 @@ def parse_args():
     return p.parse_args()
 
 
-def get_calc(model, device):
+def get_calc(model, device, dtype=None, grace_dir=GRACE_OFF_DIR):
+    if model in GRACE_SIZES:
+        from tensorpotential.calculator import TPCalculator  # TensorFlow picks the GPU itself
+
+        dtype = dtype or "float32"
+        path = os.path.join(grace_dir, "models", "2l", f"b_off_{GRACE_SIZES[model]}", "seed", "1",
+                            "saved_model" if dtype == "float64" else "casted_model")
+        if not os.path.isdir(path):
+            sys.exit(f"GRACE-OFF model not found: {path} (clone github.com/heid-lab/grace-off to --grace-dir)")
+        calc = TPCalculator(model=path)
+        if dtype == "float32":
+            # tensorpotential 0.6 always builds float64 bond vectors; the float32 export wants float32
+            calc.geom_data_builder.float_dtype = np.float32
+        return calc
+    import torch
+
+    torch.load = functools.partial(torch.load, weights_only=False)  # MACE checkpoint fix
+    sys.path.insert(0, SHARED_POTENTIALS_DIR)
+    import shared_potentials as sp
+
     if model == "mace_off23":
         return sp.get_mace23_calc(device)
     return sp.get_mace24_calc(device)
+
+
+def device_info(model):
+    if model in GRACE_SIZES:
+        import tensorpotential  # noqa: F401  (before tensorflow: sets TF_USE_LEGACY_KERAS)
+        import tensorflow as tf
+
+        gpus = tf.config.list_physical_devices("GPU")
+        return f"tensorflow {tf.__version__} | GPUs {[g.name for g in gpus] or 'none (CPU)'}"
+    import torch
+
+    return f"torch {torch.__version__} | cuda {torch.cuda.is_available()}" + (
+        f" ({torch.cuda.get_device_name(0)})" if torch.cuda.is_available() else "")
+
+
+def reference_pressure(temperature_K, rho_g_cm3):
+    """Setzmann-Wagner pressure (GPa) at (T, rho): CoolProp, else the density table inverted; nan if neither."""
+    try:
+        import CoolProp.CoolProp as CP
+        return CP.PropsSI("P", "T", float(temperature_K), "Dmass", rho_g_cm3 * 1000, "Methane") / 1e9
+    except Exception:
+        pass
+    T = int(round(temperature_K))
+    if abs(temperature_K - T) < 1e-6 and T in DENSITY_TABLE:
+        P, rho = _table(T)
+        if rho[0] <= rho_g_cm3 <= rho[-1]:
+            from scipy.interpolate import PchipInterpolator
+            return float(PchipInterpolator(rho, P)(rho_g_cm3))
+    return float("nan")
 
 
 # ---------------------------------------------------------------- box + helpers
@@ -751,24 +827,38 @@ def main():
     assert args.stress_every >= 0 and (args.stress_every == 0 or args.ckpt_every % args.stress_every == 0), \
         "--stress-every must be >= 0 and divide --ckpt-every"
 
-    # reference density: table -> CoolProp -> nearest-table guess (never fails for P > 0)
-    ref_rho, ref_src, ref_note = reference_density(TEMPERATURE_K, args.pressure)
+    if args.fixed_density:
+        if args.density is None:
+            sys.exit("--fixed-density needs --density (g/cm3)")
+        ref_P = reference_pressure(TEMPERATURE_K, args.density)
+        if args.pressure is None:  # a label only; recorded as P_target
+            args.pressure = round(ref_P, 5) if np.isfinite(ref_P) else float("nan")
+        ref_rho, ref_src, ref_note = args.density, "fixed", (
+            f"fixed density; reference (S-W) P at ({TEMPERATURE_K:g} K, {args.density:g} g/cm3) = {ref_P:.5f} GPa")
+    elif args.pressure is None:
+        sys.exit("--pressure is required (or use --fixed-density --density RHO)")
+    else:
+        # reference density: table -> CoolProp -> nearest-table guess (never fails for P > 0)
+        ref_rho, ref_src, ref_note = reference_density(TEMPERATURE_K, args.pressure)
     if args.show_density:
         print(f"T={TEMPERATURE_K:g} K, P={args.pressure:g} GPa: {ref_rho:.5f} g/cm3 [{ref_src}] {ref_note}")
         return
     rho0 = args.density if args.density is not None else ref_rho
-    outdir = args.outdir or f"statepoint_{args.model}_{TEMPERATURE_K:g}K_{args.pressure:g}GPa"
+    outdir = args.outdir or (f"statepoint_{args.model}_{TEMPERATURE_K:g}K_rho{args.density:g}" if args.fixed_density
+                             else f"statepoint_{args.model}_{TEMPERATURE_K:g}K_{args.pressure:g}GPa")
     os.makedirs(outdir, exist_ok=True)
     ckpt_path = os.path.join(outdir, "restart.npz")
     summary_path = os.path.join(outdir, "summary.json")
 
-    header = {"model": args.model, "T_K": TEMPERATURE_K, "P_target_GPa": args.pressure,
+    header = {"model": args.model + (f" ({args.dtype or 'float32'})" if args.model in GRACE_SIZES else ""),
+              "T_K": TEMPERATURE_K, "P_target_GPa": args.pressure,
               "n_molecules": args.n_molecules, "dt_fs": DT_FS,
               "units": "eV (U = potential), GPa (virial + kinetic), T from 3N-3 dof"}
-    log(f"python {platform.python_version()} on {platform.node()} | torch {torch.__version__} | "
-        f"cuda {torch.cuda.is_available()}" + (f" ({torch.cuda.get_device_name(0)})" if torch.cuda.is_available() else ""))
+    log(f"python {platform.python_version()} on {platform.node()} | {device_info(args.model)}")
     log(f"[density] reference {ref_rho:.5f} g/cm3 [{ref_src}]: {ref_note}")
-    if args.density:
+    if args.fixed_density:
+        log(f"[density] fixed at {args.density:.5f} g/cm3: no NPT")
+    elif args.density:
         log(f"[density] --density {args.density:.5f} g/cm3 overrides it as the start density")
     elif ref_src == "nearest":
         log("[density] WARNING: start density is a guess; check the NPT density converges (thermo_npt.log)")
@@ -790,10 +880,13 @@ def main():
         with open(summary_path) as fh:
             summary = json.load(fh)
         cfg = summary["config"]
-        for key in ("model", "pressure", "temperature", "n_molecules"):
-            if cfg[key] != getattr(args, key):
+        for key in ("model", "pressure", "temperature", "n_molecules", "fixed_density", "dtype"):
+            if cfg.get(key, getattr(args, key)) != getattr(args, key) and not (
+                    key == "pressure" and cfg[key] != cfg[key] and args.pressure != args.pressure):  # nan labels
                 sys.exit(f"checkpoint in {outdir}/ was made with {key}={cfg[key]}, not {getattr(args, key)}: "
                          f"use a different --outdir")
+        if args.fixed_density and abs(cfg.get("density", args.density) - args.density) > 1e-9:
+            sys.exit(f"checkpoint in {outdir}/ was made at density {cfg['density']}: use a different --outdir")
         if float(cfg.get("nve_thermostat_ps", 0.0)) != args.nve_thermostat_ps:
             sys.exit(f"checkpoint in {outdir}/ was made with --nve-thermostat-ps {cfg.get('nve_thermostat_ps', 0.0)}: "
                      f"re-run with the same value, or use a different --outdir")
@@ -842,18 +935,34 @@ def main():
             f"Checkpoint is after '{state['done']}'; re-run the same command to continue (exit {EXIT_RESUBMIT}) ===")
         return True
 
-    if ck is None:
+    if ck is None and args.init_from:
+        src = args.init_from if args.init_from.endswith(".npz") else os.path.join(args.init_from, "restart.npz")
+        ck0 = load_checkpoint(src)
+        if ck0 is None or ck0["stage"] not in ("nvt", "nve"):
+            sys.exit(f"--init-from: {src} missing or not after NVT/NVE (stage {ck0 and ck0['stage']})")
+        atoms = atoms_from_checkpoint(ck0)
+        if len(atoms) != args.n_molecules * APM:
+            sys.exit(f"--init-from: {src} has {len(atoms) // APM} molecules, not {args.n_molecules}")
+        rho_src = density(atoms)
+        set_volume_rigid_molecules(atoms, atoms.get_masses().sum() * AMU_A3_TO_G_CM3 / rho0)
+        Stationary(atoms)
+        atoms.calc = get_calc(args.model, args.device, args.dtype, args.grace_dir)
+        summary["config"]["init_from_density_g_cm3"] = rho_src
+        log(f"[init] from {src} (stage {ck0['stage']}): rho {rho_src:.5f} -> {density(atoms):.5f} g/cm3 "
+            f"({100 * (rho0 / rho_src - 1):+.1f} %), L={atoms.cell.lengths()[0]:.3f} A, velocities kept, "
+            f"T={temperature(atoms):.1f} K, P={pressure_GPa(atoms):.3f} GPa")
+    elif ck is None:
         atoms = build_box(args.n_molecules, rho0, args.seed)
         d = atoms.get_all_distances(mic=True)
         np.fill_diagonal(d, np.inf)
         log(f"[build] {len(atoms)} atoms, L={atoms.cell.lengths()[0]:.3f} A, min distance {d.min():.3f} A")
-        atoms.calc = get_calc(args.model, args.device)
+        atoms.calc = get_calc(args.model, args.device, args.dtype, args.grace_dir)
         log(f"[build] E={atoms.get_potential_energy():.4f} eV, P={pressure_GPa(atoms):.3f} GPa (lattice, no KE)")
         MaxwellBoltzmannDistribution(atoms, temperature_K=TEMPERATURE_K, rng=np.random.default_rng(args.seed))
         Stationary(atoms)
     else:
         atoms = atoms_from_checkpoint(ck)
-        atoms.calc = get_calc(args.model, args.device)
+        atoms.calc = get_calc(args.model, args.device, args.dtype, args.grace_dir)
         where = f" (NVE step {int(ck['nve_step'])}/{args.nve_steps})" if ck["stage"] == "nve" else ""
         log(f"[resume] from checkpoint after '{ck['stage']}'{where}: {len(atoms)} atoms, "
             f"L={atoms.cell.lengths()[0]:.4f} A, rho={density(atoms):.5f}, T={temperature(atoms):.1f} K")
@@ -917,7 +1026,12 @@ def main():
         checkpoint("melt")
         log(f"[melt] done ({th.rate:.1f} steps/s), checkpoint written")
 
-    # ---- NPT
+    # ---- NPT (skipped at fixed density)
+    if not completed("npt") and args.fixed_density:
+        summary["npt"] = {"skipped": "fixed density", "density_g_cm3": density(atoms),
+                          "box_length_A": atoms.cell.lengths()[0]}
+        checkpoint("npt")
+        log(f"[npt] skipped (--fixed-density): rho = {density(atoms):.5f} g/cm3, L = {atoms.cell.lengths()[0]:.4f} A")
     if not completed("npt"):
         if out_of_time(args.npt_steps, "NPT", kind="npt"):
             sys.exit(EXIT_RESUBMIT)
@@ -960,12 +1074,21 @@ def main():
         state["md_rate"] = th.rate
         P = th.col("P_GPa", True)
         summary["nvt"] = {"mean_P_GPa": P.mean(), "stderr_P_GPa": block_stderr(P), "std_P_GPa": P.std(),
-                          "mean_T_K": th.col("T_K", True).mean(), "density_g_cm3": density(atoms)}
-        log(f"[nvt] last half: <P> = {P.mean():.4f} +/- {block_stderr(P):.4f} GPa (target {args.pressure}), "
-            f"<T> = {summary['nvt']['mean_T_K']:.2f} K")
-        summary["nvt"]["nve_start"] = prepare_nve_start(th.col("Etot_eV", True), th.col("U_eV", True), select=True)
+                          "mean_T_K": th.col("T_K", True).mean(), "density_g_cm3": density(atoms),
+                          "reference_P_GPa_at_density": reference_pressure(TEMPERATURE_K, density(atoms))}
+        log(f"[nvt] last half: <P> = {P.mean():.4f} +/- {block_stderr(P):.4f} GPa (target {args.pressure}; "
+            f"S-W EOS at this density {summary['nvt']['reference_P_GPa_at_density']:.4f}), "
+            f"<T> = {summary['nvt']['mean_T_K']:.2f} K, rho = {density(atoms):.5f} g/cm3")
+        if args.nve_steps > 0:
+            summary["nvt"]["nve_start"] = prepare_nve_start(th.col("Etot_eV", True), th.col("U_eV", True),
+                                                            select=True)
         checkpoint("nvt")
-        log("[nvt] NVE start prepared; checkpoint written")
+        log("[nvt] " + ("NVE start prepared; " if args.nve_steps > 0 else "") + "checkpoint written")
+
+    if args.nve_steps == 0:
+        log(f"=== --nve-steps 0: stopping after NVT (EOS point in {summary_path}). "
+            f"Re-run with --nve-steps N to add the NVE. ===")
+        return
 
     # ---- NVE (checkpointed in chunks)
     traj_path = os.path.join(outdir, "nve.extxyz")
