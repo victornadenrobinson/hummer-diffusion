@@ -7,8 +7,11 @@
     (dP/dT)_rho; bars = seed standard deviation) vs IAPWS-95 at 400 K.
 (b) Density error at equal pressure, rho_model / rho_ref(400 K, P_model) - 1, vs P:
     GRACE-OFF H2O and CH4, and the MACE-OFF24 400 K CH4 runs for comparison.
-(c) CH4/H2O mixture: GRACE-OFF vs the P_EOS supplied with the data (source and
-    composition to be confirmed -- shown as given, not judged).
+(c) CH4/H2O mixture, x_CH4 = 18/128 = 0.1406: rho vs P, GRACE-OFF vs ideal mixing of the
+    real pure fluids (volume-additive, S-W CH4 + IAPWS-95 H2O at 400 K; this is exactly the
+    supplied P_EOS). CoolProp's GERG-type mixture model is NOT used: it is fitted to <= ~70 MPa
+    and gives ~17 % excess volume at 1 GPa here.
+(d) mixture density error vs that ideal mixture at equal pressure.
 Reference EOSs (IAPWS-95, Setzmann-Wagner via CoolProp) are validated to 1 GPa;
 beyond that the reference curve is dashed (extrapolation).
 """
@@ -29,6 +32,8 @@ FLUID = {"H2O": "Water", "CH4": "Methane"}
 COL = {"H2O": "#2a78d6", "CH4": "#eb6834", "mix": "#1baf7a"}
 INK, MUTED, GRID = "#1f1f1e", "#6b6a64", "#e4e3dc"
 T0 = 400.0
+X_CH4 = 18 / 128
+M_MOL = {"Methane": 16.043, "Water": 18.015}
 P_VALID = 1.0  # GPa, upper validation limit of both reference EOSs
 
 
@@ -51,6 +56,12 @@ def rho_ref(fluid, T, P):
         return CP.PropsSI("Dmass", "T", T, "P", P * 1e9, FLUID[fluid]) / 1e3
     except ValueError:
         return np.nan
+
+
+def rho_ideal_mix(P, x=X_CH4, T=T0):
+    """Volume-additive ideal mixture of the real pure fluids at (T, P), g/cm3."""
+    v = sum(xi * M_MOL[f] / rho_ref(k, T, P) for xi, f, k in ((x, "Methane", "CH4"), (1 - x, "Water", "H2O")))
+    return (x * M_MOL["Methane"] + (1 - x) * M_MOL["Water"]) / v
 
 
 def density_err_bar_pct(fluid, P, P_err):
@@ -103,8 +114,9 @@ def main():
     mace["density_err_pct"] = [100 * (r / rho_ref("CH4", T0, P) - 1) for r, P in zip(mace.rho_g_cm3, mace.P400)]
     mace["density_err_bar_pct"] = [density_err_bar_pct("CH4", P, e) for P, e in zip(mace.P400, mace.P_err_GPa)]
 
-    fig, (a1, a2, a3) = plt.subplots(1, 3, figsize=(16, 5.2))
-    for a in (a1, a2, a3):
+    fig, axs = plt.subplots(2, 2, figsize=(13, 10))
+    a1, a2, a3, a4 = axs.flat
+    for a in (a1, a2, a3, a4):
         style(a)
 
     # (a) water P(rho)
@@ -152,25 +164,42 @@ def main():
         Line2D([], [], color=COL["CH4"], marker="s", mfc="white", ls="--", label=r"CH$_4$, MACE-OFF24"),
     ], fontsize=8.5, frameon=False, loc="lower left")
 
-    # (c) mixture vs supplied reference
-    x = m[m.kind == "mix"]
-    a3.errorbar(x.rho_g_cm3, x.P, yerr=x.P_sd, fmt="o", ms=6, color=COL["mix"], mec="white", mew=0.8,
+    # (c) mixture: rho vs P against ideal mixing; (d) density error at equal P
+    x = m[m.kind == "mix"].copy()
+    pp = np.linspace(0.1, 1.9, 120)
+    a3.plot(pp, [rho_ideal_mix(P) for P in pp], "--", color=INK, lw=1.4,
+            label="ideal mix of real H$_2$O + CH$_4$ (x$_{CH_4}$ = 0.141)")
+    a3.errorbar(x.P, x.rho_g_cm3, xerr=x.P_sd, fmt="o", ms=6, color=COL["mix"], mec="white", mew=0.8,
                 capsize=0, label="GRACE-OFF, N = 128 (seed mean)")
-    a3.plot(x.rho_g_cm3, x.P_EOS, "x", color=INK, ms=7, mew=1.5, label=r"$P_\mathrm{EOS}$ as supplied")
     big = df[(df.kind == "mix") & (df.N > 128)]
-    a3.scatter(big.rho_g_cm3 + 0.004, big.P400, s=22, color=COL["mix"], marker="D", edgecolors=INK, lw=0.5,
-               label="N = 256-1024 (finite-size check)", zorder=4)
-    a3.set_xlabel(r"density (g/cm$^3$)", color=INK)
-    a3.set_ylabel("P (GPa)", color=INK)
-    a3.set_title(r"(c) CH$_4$/H$_2$O mixture, ~400 K", loc="left", fontsize=11, color=INK)
+    a3.scatter(big.P400, big.rho_g_cm3 + 0.004, s=22, color=COL["mix"], marker="D", edgecolors=INK, lw=0.5,
+               label="N = 256-1024 (offset +0.004 for visibility)", zorder=4)
+    a3.set_xlabel("P (GPa)", color=INK)
+    a3.set_ylabel(r"density (g/cm$^3$)", color=INK)
+    a3.set_title(r"(c) CH$_4$/H$_2$O mixture (14 % CH$_4$), ~400 K", loc="left", fontsize=11, color=INK)
     a3.legend(fontsize=8.5, frameon=False, loc="upper left")
-    a3.text(0.98, 0.03, "reference source & composition: TBC;\nCH$_4$/H$_2$O may not be fully miscible here",
+    a3.text(0.98, 0.03, "ideal mixing is a baseline, not data: real CH$_4$/H$_2$O\n"
+            "has a non-zero excess volume and may demix at 400 K",
             transform=a3.transAxes, ha="right", fontsize=8, color=MUTED)
+
+    x["rho_ideal"] = [rho_ideal_mix(P) for P in x.P]
+    h = 0.005
+    beta = np.array([(rho_ideal_mix(P + h) - rho_ideal_mix(P - h)) / (2 * h) / ri for P, ri in zip(x.P, x.rho_ideal)])
+    x["mix_err_pct"] = 100 * (x.rho_g_cm3 / x.rho_ideal - 1)
+    x["mix_err_bar_pct"] = 100 * beta * x.P_sd
+    a4.axhline(0, color=MUTED, lw=1)
+    a4.errorbar(x.P, x.mix_err_pct, yerr=x.mix_err_bar_pct, fmt="o-", color=COL["mix"], ms=6, lw=2, mec="white",
+                mew=0.8, capsize=0, elinewidth=1, label="GRACE-OFF")
+    a4.set_xlabel("P (GPa)", color=INK)
+    a4.set_ylabel(r"$\rho_\mathrm{model}/\rho_\mathrm{ideal\ mix}(400\,\mathrm{K}, P) - 1$  (%)", color=INK)
+    a4.set_title("(d) mixture density vs ideal mixing, equal pressure", loc="left", fontsize=11, color=INK)
+    a4.legend(fontsize=8.5, frameon=False, loc="upper right")
+    m = m.merge(x[["rho_g_cm3", "rho_ideal", "mix_err_pct", "mix_err_bar_pct"]], on="rho_g_cm3", how="left")
 
     fig.text(0.01, 0.005, "Pressures from NVE, T-corrected to 400 K with the reference (dP/dT)$_\\rho$ (pure fluids "
              "only); bars = seed std (GRACE) or block stderr (MACE), in (b) times the reference compressibility. "
              "Reference EOSs via CoolProp, validated to 1 GPa.", fontsize=8, color=MUTED)
-    fig.tight_layout(rect=(0, 0.03, 1, 1))
+    fig.tight_layout(rect=(0, 0.025, 1, 1))
     for ext in ("png", "pdf"):
         fig.savefig(f"{args.out}.{ext}", dpi=200)
     m.to_csv(f"{args.out}_summary.csv", index=False, float_format="%.5g")
