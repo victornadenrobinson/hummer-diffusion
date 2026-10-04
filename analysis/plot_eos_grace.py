@@ -96,6 +96,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--grace", default=HERE / "data" / "grace_eos_400K.txt")
     ap.add_argument("--mace", default=HERE / "data" / "mace_off24_D.csv")
+    ap.add_argument("--mace-mix", default=HERE / "data" / "mace_off24_mix14_400K_digitized.csv",
+                    help="MACE-OFF24 mixture <P>, rho (same composition), for panels (c)/(d)")
     ap.add_argument("--out", default=HERE / "eos_grace_400K")
     args = ap.parse_args()
 
@@ -171,6 +173,9 @@ def main():
             label="ideal mix of real H$_2$O + CH$_4$ (x$_{CH_4}$ = 0.141)")
     a3.errorbar(x.P, x.rho_g_cm3, xerr=x.P_sd, fmt="o", ms=6, color=COL["mix"], mec="white", mew=0.8,
                 capsize=0, label="GRACE-OFF, N = 128 (seed mean)")
+    mm = pd.read_csv(args.mace_mix, comment="#").sort_values("P_GPa")
+    a3.plot(mm.P_GPa, mm.rho_g_cm3, "s", color=COL["mix"], mfc="white", mew=1.4, ms=5.5,
+            label="MACE-OFF24 (digitized from plot)")
     big = df[(df.kind == "mix") & (df.N > 128)]
     a3.scatter(big.P400, big.rho_g_cm3 + 0.004, s=22, color=COL["mix"], marker="D", edgecolors=INK, lw=0.5,
                label="N = 256-1024 (offset +0.004 for visibility)", zorder=4)
@@ -190,10 +195,14 @@ def main():
     a4.axhline(0, color=MUTED, lw=1)
     a4.errorbar(x.P, x.mix_err_pct, yerr=x.mix_err_bar_pct, fmt="o-", color=COL["mix"], ms=6, lw=2, mec="white",
                 mew=0.8, capsize=0, elinewidth=1, label="GRACE-OFF")
+    mm_err = 100 * (mm.rho_g_cm3 / np.array([rho_ideal_mix(P) for P in mm.P_GPa]) - 1)
+    a4.plot(mm.P_GPa, mm_err, "s--", color=COL["mix"], mfc="white", mew=1.4, ms=5.5, lw=1.2,
+            label="MACE-OFF24 (digitized from plot)")
     a4.set_xlabel("P (GPa)", color=INK)
     a4.set_ylabel(r"$\rho_\mathrm{model}/\rho_\mathrm{ideal\ mix}(400\,\mathrm{K}, P) - 1$  (%)", color=INK)
     a4.set_title("(d) mixture density vs ideal mixing, equal pressure", loc="left", fontsize=11, color=INK)
     a4.legend(fontsize=8.5, frameon=False, loc="upper right")
+    a4.set_xlim(0, 1.9)
     m = m.merge(x[["rho_g_cm3", "rho_ideal", "mix_err_pct", "mix_err_bar_pct"]], on="rho_g_cm3", how="left")
 
     fig.text(0.01, 0.005, "Pressures from NVE, T-corrected to 400 K with the reference (dP/dT)$_\\rho$ (pure fluids "
